@@ -59,16 +59,18 @@ function deriveFileId(rawContent) {
 
 /**
  * Upload a single chunk to the contract and persist it in the local DB.
+ * If a DatabaseManager is supplied, also inserts chunk metadata there.
  *
  * @param {object} opts
- * @param {import('ethers').Contract}      opts.contract
- * @param {import('node:sqlite').DatabaseSync} opts.database
+ * @param {import('ethers').Contract}                  opts.contract
+ * @param {import('node:sqlite').DatabaseSync}          opts.database
  * @param {string}  opts.fileId
  * @param {number}  opts.chunkIndex
  * @param {Buffer}  opts.data
+ * @param {import('./db-manager').DatabaseManager} [opts.dbManager]
  * @param {boolean} [opts.verbose]
  */
-async function uploadChunk({ contract, database, fileId, chunkIndex, data, verbose }) {
+async function uploadChunk({ contract, database, fileId, chunkIndex, data, dbManager, verbose }) {
   const tx = await contract.uploadChunk(fileId, chunkIndex, data);
   const receipt = await tx.wait();
 
@@ -79,6 +81,22 @@ async function uploadChunk({ contract, database, fileId, chunkIndex, data, verbo
     txHash: receipt.hash,
     blockNumber: receipt.blockNumber,
   });
+
+  if (dbManager) {
+    const crypto = require("crypto");
+    // Find the ChunkUploaded log in the receipt to get the actual log index.
+    // uploadChunk() emits exactly one event, so it will be the first (and only)
+    // log in the receipt that the contract emitted.
+    const logIndex = receipt.logs.length > 0 ? receipt.logs[0].index : 0;
+    dbManager.insertChunk({
+      fileId,
+      chunkIndex,
+      chunkHash: crypto.createHash("sha256").update(data).digest("hex"),
+      txHash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      logIndex,
+    });
+  }
 
   if (verbose) {
     console.log(
@@ -94,10 +112,11 @@ async function uploadChunk({ contract, database, fileId, chunkIndex, data, verbo
  * @param {string}  opts.filePath        Local path to the file to upload.
  * @param {import('ethers').Contract}      opts.contract  Connected ChainFS contract.
  * @param {import('node:sqlite').DatabaseSync} opts.database  Open SQLite handle.
+ * @param {import('./db-manager').DatabaseManager} [opts.dbManager] Optional index DB.
  * @param {boolean} [opts.verbose]       Print progress.
  * @returns {Promise<{ fileId: string, chunkCount: number }>}
  */
-async function upload({ filePath, contract, database, verbose }) {
+async function upload({ filePath, contract, database, dbManager, verbose }) {
   const rawContent = fs.readFileSync(filePath);
   const name = path.basename(filePath);
   const fileId = deriveFileId(rawContent);
@@ -141,6 +160,21 @@ async function upload({ filePath, contract, database, verbose }) {
     blockNumber: receipt.blockNumber,
   });
 
+  if (dbManager) {
+    dbManager.insertFile({
+      fileId,
+      owner: await contract.runner.getAddress(),
+      name,
+      mimeType: null,
+      originalSize: rawContent.length,
+      compressedSize: compressed.length,
+      contentHash: fileId,
+      totalChunks: chunks.length,
+      timestamp: 0,
+      blockNumber: receipt.blockNumber,
+    });
+  }
+
   if (verbose) {
     console.log(`  createFile tx: ${receipt.hash}`);
   }
@@ -153,6 +187,7 @@ async function upload({ filePath, contract, database, verbose }) {
       fileId,
       chunkIndex: i,
       data: chunks[i],
+      dbManager,
       verbose,
     });
   }
