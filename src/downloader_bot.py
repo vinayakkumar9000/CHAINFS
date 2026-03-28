@@ -56,7 +56,7 @@ class DownloaderBot:
         )
         self.max_workers = max_workers
         self.log_batch_size = log_batch_size
-        # Enforce a minimum of 3 retries to satisfy the requirement.
+        # Enforce a minimum of 3 total attempts (initial + retries) to satisfy the requirement.
         self.retry_attempts = max(3, retry_attempts)
         self.retry_backoff_seconds = retry_backoff_seconds
         self.max_backoff_seconds = max_backoff_seconds
