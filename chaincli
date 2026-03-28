@@ -1,31 +1,328 @@
 #!/usr/bin/env python3
 """
-chaincli – entrypoint for ChainFS CLI tools.
+chaincli – ChainFS command-line interface.
 
-Currently supports:
-  - manager  : launches ManagerBot (wallet + deployment)
+Commands:
+  manager              Set up wallet and deploy contract
+  upload <file>        Upload a file to ChainFS
+  download <file_id>   Download a file from ChainFS
+  list                 List all indexed files
+  sync                 Sync local index with the chain
+  info <file_id>       Show file details
 """
 
+import argparse
+import json
+import os
+import sqlite3
+import subprocess
 import sys
-from typing import Callable, Dict, List
+from pathlib import Path
 
-from src.manager_bot import main as manager_main
+# ── Constants ─────────────────────────────────────────────────────────────────
+
+_CONFIG_DIR = Path("config")
+_CONTRACT_CONFIG = _CONFIG_DIR / "contract.json"
+_ARTIFACT_PATH = Path("artifacts/contracts/ChainFS.sol/ChainFS.json")
+_DEFAULT_DB_PATH = Path("data") / "chainfs.db"
+_DOWNLOADS_DIR = Path("downloads")
+_RPC_URL = os.environ.get(
+    "CHAINFS_RPC_URL",
+    "https://base-sepolia-testnet.skalenodes.com/v1/jubilant-horrible-ancha",
+)
+_RPC_TIMEOUT = 30
+_FILE_ID_DISPLAY_LEN = 20
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-COMMANDS: Dict[str, Callable[[List[str]], int]] = {
-    "manager": manager_main,
-}
+def _format_size(size_bytes):
+    """Return a human-readable file size string."""
+    if size_bytes >= 1_048_576:
+        return f"{size_bytes / 1_048_576:.1f} MB"
+    if size_bytes >= 1_024:
+        return f"{size_bytes / 1_024:.1f} KB"
+    return f"{size_bytes} B"
 
 
-def main() -> int:
-    if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
-        print("Usage: chaincli manager")
-        return 1
+def _load_contract_address():
+    """Read the deployed contract address from config/contract.json."""
+    if not _CONTRACT_CONFIG.exists():
+        print("Error: No contract deployed. Run `chaincli manager` first. ✖")
+        sys.exit(1)
+    try:
+        data = json.loads(_CONTRACT_CONFIG.read_text())
+        address = data.get("contractAddress")
+        if not address:
+            raise ValueError("contractAddress missing.")
+        return address
+    except Exception as exc:
+        print(f"Error: Could not read contract config: {exc} ✖")
+        sys.exit(1)
 
-    command = sys.argv[1]
-    handler = COMMANDS[command]
-    return handler()
+
+def _open_db():
+    """Open the local ChainFS index database (read-only). Returns None if absent."""
+    if not _DEFAULT_DB_PATH.exists():
+        return None
+    conn = sqlite3.connect(_DEFAULT_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _make_downloader_bot():
+    """Instantiate DownloaderBot using local config files."""
+    from web3 import Web3
+    from src.downloader_bot import DownloaderBot
+
+    contract_address = _load_contract_address()
+
+    if not _ARTIFACT_PATH.exists():
+        print("Error: Contract artifact not found. Run `npm run compile` first. ✖")
+        sys.exit(1)
+
+    artifact = json.loads(_ARTIFACT_PATH.read_text())
+    abi = artifact.get("abi")
+    if not abi:
+        print("Error: ABI missing from contract artifact. ✖")
+        sys.exit(1)
+
+    web3 = Web3(Web3.HTTPProvider(_RPC_URL, request_kwargs={"timeout": _RPC_TIMEOUT}))
+    if not web3.is_connected():
+        print(f"Error: Cannot connect to RPC at {_RPC_URL} ✖")
+        sys.exit(1)
+
+    return DownloaderBot(web3, contract_address, abi)
+
+
+# ── Commands ──────────────────────────────────────────────────────────────────
+
+
+def cmd_manager(_args):
+    """Set up wallet and deploy ChainFS contract."""
+    from src.manager_bot import main as manager_main
+
+    sys.exit(manager_main())
+
+
+def cmd_upload(args):
+    """Upload a file to ChainFS."""
+    file_path = args.file_path
+
+    if not Path(file_path).exists():
+        print(f"Error: File not found – {file_path} ✖")
+        sys.exit(1)
+
+    print(f"Uploading {Path(file_path).name}...")
+    try:
+        from src.storage_bot import StorageBot
+
+        bot = StorageBot()
+        file_id = bot.upload_file(file_path)
+        print(f"\nUpload complete ✔")
+        print(f"File ID: {file_id}")
+    except FileNotFoundError as exc:
+        print(f"\nError: {exc} ✖")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("\nCancelled. ✖")
+        sys.exit(1)
+    except Exception as exc:
+        print(f"\nError: {exc} ✖")
+        sys.exit(1)
+
+
+def cmd_download(args):
+    """Download a file from ChainFS."""
+    file_id = args.file_id
+    _DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+    print("Downloading...")
+    try:
+        bot = _make_downloader_bot()
+
+        # Fetch metadata first so we can save under the original filename.
+        try:
+            metadata = bot.get_file_metadata(file_id)
+            filename = metadata.get("name") or file_id
+        except Exception:
+            filename = file_id
+
+        output_path = str(_DOWNLOADS_DIR / filename)
+        bot.download(file_id=file_id, output_path=output_path)
+
+        print(f"\nDownload complete ✔")
+        print(f"Saved to: {output_path}")
+    except ValueError as exc:
+        if "not found" in str(exc).lower():
+            print(f"\nError: File not found – {file_id} ✖")
+        else:
+            print(f"\nError: {exc} ✖")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("\nCancelled. ✖")
+        sys.exit(1)
+    except Exception as exc:
+        print(f"\nError: {exc} ✖")
+        sys.exit(1)
+
+
+def cmd_list(_args):
+    """List all indexed files."""
+    conn = _open_db()
+    if conn is None:
+        print("No files found. Run `chaincli sync` to index the chain.")
+        return
+
+    try:
+        rows = conn.execute(
+            "SELECT file_id, name, original_size FROM files"
+            " ORDER BY timestamp DESC, block_number DESC"
+        ).fetchall()
+
+        if not rows:
+            print("No files found. Run `chaincli sync` to index the chain.")
+            return
+
+        # Column widths
+        id_w = max(len("File ID"), max(min(len(r["file_id"]), _FILE_ID_DISPLAY_LEN) for r in rows))
+        name_w = max(len("Name"), max(len(r["name"] or "-") for r in rows))
+        size_w = max(len("Size"), max(len(_format_size(r["original_size"] or 0)) for r in rows))
+
+        header = f"{'File ID':<{id_w}}  {'Name':<{name_w}}  {'Size':>{size_w}}"
+        print(f"\n{header}")
+        print("-" * len(header))
+
+        for row in rows:
+            fid = row["file_id"]
+            if len(fid) > _FILE_ID_DISPLAY_LEN:
+                fid = fid[: _FILE_ID_DISPLAY_LEN - 3] + "..."
+            name = row["name"] or "-"
+            size = _format_size(row["original_size"] or 0)
+            print(f"{fid:<{id_w}}  {name:<{name_w}}  {size:>{size_w}}")
+
+        print()
+    finally:
+        conn.close()
+
+
+def cmd_sync(_args):
+    """Sync local index with the chain."""
+    print("Syncing...")
+
+    contract_address = _load_contract_address()
+    env = os.environ.copy()
+    env["CHAINFS_CONTRACT"] = contract_address
+    env["CHAINFS_RPC_URL"] = _RPC_URL
+
+    result = subprocess.run(
+        ["node", "src/cli.js", "sync", "-v"],
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    if result.returncode == 0:
+        output = result.stdout.strip()
+        if output:
+            print(output)
+        print("\nSync complete ✔")
+    else:
+        err = (result.stderr or result.stdout).strip()
+        print(f"Sync failed: {err} ✖")
+        sys.exit(1)
+
+
+def cmd_info(args):
+    """Show file details."""
+    file_id = args.file_id
+
+    conn = _open_db()
+    if conn is None:
+        print("Error: No local database found. Run `chaincli sync` first. ✖")
+        sys.exit(1)
+
+    try:
+        row = conn.execute(
+            "SELECT * FROM files WHERE file_id = ?", (file_id,)
+        ).fetchone()
+
+        if row is None:
+            # Try prefix match for convenience.
+            rows = conn.execute(
+                "SELECT * FROM files WHERE file_id LIKE ?", (file_id + "%",)
+            ).fetchall()
+            if len(rows) == 1:
+                row = rows[0]
+            elif len(rows) > 1:
+                print("Error: Ambiguous file ID prefix – be more specific. ✖")
+                sys.exit(1)
+
+        if row is None:
+            print(f"Error: File not found – {file_id} ✖")
+            sys.exit(1)
+
+        print(f"\nFile ID : {row['file_id']}")
+        print(f"Name    : {row['name'] or '-'}")
+        print(f"Size    : {_format_size(row['original_size'] or 0)}")
+        print(f"Chunks  : {row['total_chunks']}")
+        print(f"Owner   : {row['owner'] or '-'}")
+        if row["block_number"]:
+            print(f"Block   : {row['block_number']}")
+        print()
+    finally:
+        conn.close()
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="chaincli",
+        description="ChainFS – Decentralized file storage on EVM",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "examples:\n"
+            "  chaincli manager\n"
+            "  chaincli upload report.pdf\n"
+            "  chaincli download 0xabc123\n"
+            "  chaincli list\n"
+            "  chaincli sync\n"
+            "  chaincli info 0xabc123\n"
+        ),
+    )
+
+    sub = parser.add_subparsers(dest="command", metavar="<command>")
+    sub.required = True
+
+    sub.add_parser("manager", help="Set up wallet and deploy contract")
+
+    p_upload = sub.add_parser("upload", help="Upload a file to ChainFS")
+    p_upload.add_argument("file_path", metavar="<file>", help="Path to the file")
+
+    p_download = sub.add_parser("download", help="Download a file from ChainFS")
+    p_download.add_argument("file_id", metavar="<file_id>", help="File ID (0x...)")
+
+    sub.add_parser("list", help="List all indexed files")
+    sub.add_parser("sync", help="Sync local index with the chain")
+
+    p_info = sub.add_parser("info", help="Show file details")
+    p_info.add_argument("file_id", metavar="<file_id>", help="File ID (0x...)")
+
+    args = parser.parse_args()
+
+    handlers = {
+        "manager": cmd_manager,
+        "upload": cmd_upload,
+        "download": cmd_download,
+        "list": cmd_list,
+        "sync": cmd_sync,
+        "info": cmd_info,
+    }
+
+    handlers[args.command](args)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
