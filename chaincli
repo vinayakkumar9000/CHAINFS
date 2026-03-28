@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+"""
+chaincli – entrypoint for ChainFS CLI tools.
+
+Currently supports:
+  - manager  : launches ManagerBot (wallet + deployment)
+"""
+
+import sys
+from typing import Callable, Dict, List
+
+from src.manager_bot import main as manager_main
+
+
+COMMANDS: Dict[str, Callable[[List[str]], int]] = {
+    "manager": manager_main,
+}
+
+
+def main() -> int:
+    if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
+        print("Usage: chaincli manager")
+        return 1
+
+    command = sys.argv[1]
+    handler = COMMANDS[command]
+    return handler()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
