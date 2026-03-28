@@ -6,3 +6,5 @@ artifacts/
 coverage/
 coverage.json
 typechain-types/
+config/wallet_private_key.txt
+config/contract.json
