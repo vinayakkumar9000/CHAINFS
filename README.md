@@ -131,6 +131,16 @@ Select an option:
 Enter choice (1 or 2):
 ```
 
+If `config/wallet_private_key.txt` already exists (from a previous run), you will
+instead be asked:
+
+```
+Existing wallet detected at config/wallet_private_key.txt. Use it? (y/n):
+```
+
+Type `y` to load the saved wallet automatically and skip re-entering your key.
+Type `n` to see the normal menu and create or import a different wallet.
+
 ---
 
 ### Option 1 — Create a new wallet
@@ -166,7 +176,10 @@ Type `2` and press Enter.
 ```
 Enter your private key (0x...): 0xYourPrivateKey
 Using wallet: 0xYourWalletAddress
+Private key saved to config/wallet_private_key.txt (permissions restricted where possible).
 ```
+
+The key is saved to `config/wallet_private_key.txt` so subsequent runs load it automatically.
 
 If the wallet has no balance, you will be prompted to use the faucet (same as above).
 
