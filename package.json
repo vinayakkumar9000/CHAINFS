@@ -1,0 +1,24 @@
+{
+  "name": "chainfs",
+  "version": "1.0.0",
+  "description": "Decentralized file storage system built on EVM",
+  "main": "src/cli.js",
+  "bin": {
+    "chainfs": "./src/cli.js"
+  },
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "node": "hardhat node",
+    "deploy:local": "hardhat run scripts/deploy.js --network localhost",
+    "deploy": "hardhat run scripts/deploy.js"
+  },
+  "dependencies": {
+    "commander": "^12.0.0",
+    "ethers": "^6.11.1"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "hardhat": "^2.22.2"
+  }
+}
