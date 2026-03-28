@@ -62,7 +62,7 @@ function deriveFileId(rawContent) {
  *
  * @param {object} opts
  * @param {import('ethers').Contract}      opts.contract
- * @param {import('better-sqlite3').Database} opts.database
+ * @param {import('node:sqlite').DatabaseSync} opts.database
  * @param {string}  opts.fileId
  * @param {number}  opts.chunkIndex
  * @param {Buffer}  opts.data
@@ -93,7 +93,7 @@ async function uploadChunk({ contract, database, fileId, chunkIndex, data, verbo
  * @param {object} opts
  * @param {string}  opts.filePath        Local path to the file to upload.
  * @param {import('ethers').Contract}      opts.contract  Connected ChainFS contract.
- * @param {import('better-sqlite3').Database} opts.database  Open SQLite handle.
+ * @param {import('node:sqlite').DatabaseSync} opts.database  Open SQLite handle.
  * @param {boolean} [opts.verbose]       Print progress.
  * @returns {Promise<{ fileId: string, chunkCount: number }>}
  */

@@ -45,7 +45,7 @@ function verify(content, expectedFileId) {
  *
  * @param {object} opts
  * @param {import('ethers').Contract}         opts.contract
- * @param {import('better-sqlite3').Database} opts.database
+ * @param {import('node:sqlite').DatabaseSync} opts.database
  * @param {string}  opts.fileId
  * @param {number}  [opts.fromBlock]  Start of log range (default 0).
  * @param {boolean} [opts.verbose]
@@ -90,7 +90,7 @@ async function fetchChunks({ contract, database, fileId, fromBlock = 0, verbose 
  * @param {string}  opts.fileId        bytes32 hex string.
  * @param {string}  opts.outputPath    Where to write the reconstructed file.
  * @param {import('ethers').Contract}         opts.contract
- * @param {import('better-sqlite3').Database} opts.database
+ * @param {import('node:sqlite').DatabaseSync} opts.database
  * @param {number}  [opts.fromBlock]
  * @param {boolean} [opts.verbose]
  * @returns {Promise<void>}
@@ -148,7 +148,7 @@ async function download({ fileId, outputPath, contract, database, fromBlock = 0,
  *
  * @param {object} opts
  * @param {import('ethers').Contract}         opts.contract
- * @param {import('better-sqlite3').Database} opts.database
+ * @param {import('node:sqlite').DatabaseSync} opts.database
  * @param {boolean} [opts.verbose]
  */
 async function sync({ contract, database, verbose }) {
