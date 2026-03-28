@@ -47,6 +47,8 @@ class DownloaderBot:
             raise ValueError("log_batch_size must be a positive integer")
         if max_backoff_seconds <= 0:
             raise ValueError("max_backoff_seconds must be positive")
+        if retry_backoff_seconds <= 0:
+            raise ValueError("retry_backoff_seconds must be positive")
 
         self.web3 = web3
         self.contract = web3.eth.contract(
@@ -65,7 +67,11 @@ class DownloaderBot:
             db_dir = os.path.dirname(db_path)
             if db_dir:
                 os.makedirs(db_dir, exist_ok=True)
-            self.conn = sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES)
+            self.conn = sqlite3.connect(
+                db_path,
+                detect_types=sqlite3.PARSE_DECLTYPES,
+                check_same_thread=False,
+            )
             self.conn.row_factory = sqlite3.Row
             self.conn.execute("PRAGMA journal_mode=WAL")
             self._db_lock = threading.Lock()
@@ -146,7 +152,7 @@ class DownloaderBot:
         start_block = 0 if from_block is None else from_block
         end_block = latest_block if to_block is None else to_block
         if start_block > end_block:
-            raise ValueError("from_block cannot be greater than to_block")
+            raise ValueError("from_block (start_block) cannot be greater than to_block (end_block)")
 
         ranges = self._build_block_ranges(start_block, end_block, self.log_batch_size)
         if not ranges:
@@ -203,14 +209,15 @@ class DownloaderBot:
         ordered = [data for _, data in sorted(chunks, key=lambda pair: pair[0])]
         return b"".join(ordered)
 
-    def decompress_data(self, data: bytes) -> bytes:
+    def decompress_data(self, data: bytes, file_id: Optional[str] = None) -> bytes:
         """
         Decompress gzip-compressed bytes. Raises on corruption.
         """
         try:
             return gzip.decompress(data)
         except OSError as exc:
-            raise ValueError(f"Decompression failed (gzip data may be corrupted): {exc}") from exc
+            prefix = f" for file {file_id}" if file_id else ""
+            raise ValueError(f"Decompression failed{prefix} (gzip data may be corrupted): {exc}") from exc
 
     def verify_hash(self, data: bytes, expected_hash: str) -> Tuple[bool, str]:
         """
@@ -261,7 +268,7 @@ class DownloaderBot:
         chunks = self.extract_chunks(events, file_id=metadata["fileId"])
         self.validate_chunks(chunks, metadata["totalChunks"])
         compressed = self.reconstruct_data(chunks)
-        decompressed = self.decompress_data(compressed)
+        decompressed = self.decompress_data(compressed, file_id=metadata["fileId"])
         matches, computed_hash = self.verify_hash(decompressed, metadata["contentHash"])
         if not matches:
             raise ValueError(
