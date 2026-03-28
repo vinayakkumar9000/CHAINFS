@@ -53,7 +53,7 @@ class DownloaderBot:
             db_dir = os.path.dirname(db_path)
             if db_dir:
                 os.makedirs(db_dir, exist_ok=True)
-            self.conn = sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES, check_same_thread=False)
+            self.conn = sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES)
             self.conn.row_factory = sqlite3.Row
             self._init_schema()
 
@@ -365,17 +365,16 @@ class DownloaderBot:
         return ranges
 
     def _call_with_retries(self, fn: Callable[[], T]) -> T:
-        last_err: Optional[Exception] = None
         for attempt in range(1, self.retry_attempts + 1):
             try:
                 return fn()
+            except BaseException:
+                # Do not swallow system-level exceptions.
+                raise
             except Exception as exc:  # broad by design: we must retry RPC failures
-                last_err = exc
                 if attempt == self.retry_attempts:
                     raise
                 time.sleep(self.retry_backoff_seconds * (2 ** (attempt - 1)))
-        if last_err:
-            raise last_err
 
     @staticmethod
     def _hex(topic: Any) -> str:
