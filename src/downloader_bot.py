@@ -67,6 +67,7 @@ class DownloaderBot:
                 os.makedirs(db_dir, exist_ok=True)
             self.conn = sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES, check_same_thread=False)
             self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA journal_mode=WAL")
             self._db_lock = threading.Lock()
             self._init_schema()
 
@@ -211,13 +212,13 @@ class DownloaderBot:
         except OSError as exc:
             raise ValueError(f"Decompression failed (gzip data may be corrupted): {exc}") from exc
 
-    def verify_hash(self, data: bytes, expected_hash: str) -> bool:
+    def verify_hash(self, data: bytes, expected_hash: str) -> Tuple[bool, str]:
         """
-        Compare SHA-256 digest (0x-prefixed hex) to expected_hash.
+        Compare SHA-256 digest (0x-prefixed hex) to expected_hash and return (matches, computed_digest).
         """
         digest = self._hash_bytes(data)
         normalized_expected = self._normalize_hash(expected_hash)
-        return digest.lower() == normalized_expected.lower()
+        return digest.lower() == normalized_expected.lower(), digest
 
     def save_file(self, file_path: str, data: bytes) -> None:
         """
@@ -261,8 +262,8 @@ class DownloaderBot:
         self.validate_chunks(chunks, metadata["totalChunks"])
         compressed = self.reconstruct_data(chunks)
         decompressed = self.decompress_data(compressed)
-        computed_hash = self._hash_bytes(decompressed)
-        if not self.verify_hash(decompressed, metadata["contentHash"]):
+        matches, computed_hash = self.verify_hash(decompressed, metadata["contentHash"])
+        if not matches:
             raise ValueError(
                 f"Content integrity verification failed: computed SHA256 {computed_hash} does not match expected {metadata['contentHash']}"
             )
@@ -404,7 +405,7 @@ class DownloaderBot:
                 last_error = exc
                 if attempt == self.retry_attempts:
                     break
-                delay = min(self.retry_backoff_seconds * (2 ** (attempt - 1)), self.max_backoff_seconds)
+                delay = min(self.retry_backoff_seconds * (1.5 ** (attempt - 1)), self.max_backoff_seconds)
                 time.sleep(delay)
         assert last_error is not None
         raise last_error
