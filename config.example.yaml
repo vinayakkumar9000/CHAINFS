@@ -1,0 +1,77 @@
+# ChainFS configuration reference
+# ─────────────────────────────────────────────────────────────────────────────
+# This file documents all configuration options.  ChainFS reads configuration
+# from environment variables (Node.js CLI) and local config files (Python CLI).
+#
+# Python CLI config files (created by `chaincli manager`):
+#   config/contract.json        – deployed contract address
+#   config/wallet_private_key.txt – wallet private key (permissions 600)
+#
+# Node.js CLI uses environment variables listed below.
+
+# ─── Network ──────────────────────────────────────────────────────────────────
+
+network:
+  # JSON-RPC endpoint.
+  # Env: CHAINFS_RPC_URL
+  # Default: http://127.0.0.1:8545
+  rpc_url: "http://127.0.0.1:8545"
+
+  # SKALE Base Sepolia Testnet (default for Python bots)
+  # rpc_url: "https://base-sepolia-testnet.skalenodes.com/v1/jubilant-horrible-ancha"
+  # chain_id: 324705682
+
+# ─── Contract ─────────────────────────────────────────────────────────────────
+
+contract:
+  # Deployed ChainFS contract address.
+  # Env: CHAINFS_CONTRACT
+  # Python bots read this from config/contract.json automatically.
+  address: "0x<deployed address>"
+
+# ─── Wallet ───────────────────────────────────────────────────────────────────
+
+wallet:
+  # Signer private key (required for upload).
+  # Env: CHAINFS_PRIVATE_KEY
+  # Python bots read this from config/wallet_private_key.txt automatically.
+  # WARNING: never commit real private keys to version control.
+  private_key: "0x<64-hex-char private key>"
+
+# ─── Database ─────────────────────────────────────────────────────────────────
+
+database:
+  # SQLite blob-store path (Node.js upload/download pipeline).
+  # Env: CHAINFS_DB_PATH
+  # Default: ~/.chainfs/chainfs.db
+  blob_store_path: "~/.chainfs/chainfs.db"
+
+  # SQLite index DB path (sync-engine, list, sync commands).
+  # Env: CHAINFS_INDEX_DB_PATH
+  # Default: ./data/chainfs.db
+  index_db_path: "./data/chainfs.db"
+
+# ─── Sync Engine ──────────────────────────────────────────────────────────────
+
+sync:
+  # Number of blocks to query per RPC batch (default: 2000).
+  batch_size: 2000
+
+  # Number of blocks behind chain tip to stay (reorg protection, default: 5).
+  safe_window: 5
+
+  # Maximum parallel batch workers (default: 5).
+  max_concurrent: 5
+
+  # Maximum RPC retry attempts per batch (default: 3).
+  max_retries: 3
+
+# ─── Upload ───────────────────────────────────────────────────────────────────
+
+upload:
+  # Maximum chunk size in bytes (must be ≤ ChainFS.MAX_CHUNK_SIZE = 24576).
+  # Node.js uses 24576; Python bot starts at 16384 for extra safety headroom.
+  chunk_size: 16384
+
+  # Maximum upload retry attempts per chunk (Python bot, default: 5).
+  max_retry_attempts: 5
