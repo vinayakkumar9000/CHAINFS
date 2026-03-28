@@ -16,6 +16,7 @@ import hashlib
 import logging
 import os
 import sqlite3
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, TypeVar
@@ -35,10 +36,15 @@ class DownloaderBot:
         db_path: Optional[str] = None,
         *,
         max_workers: int = 4,
-        log_batch_size: int = 5_000,
+        log_batch_size: int = 1_000,
         retry_attempts: int = 3,
         retry_backoff_seconds: float = 0.5,
     ) -> None:
+        if max_workers <= 0:
+            raise ValueError("max_workers must be a positive integer")
+        if log_batch_size <= 0:
+            raise ValueError("log_batch_size must be a positive integer")
+
         self.web3 = web3
         self.contract = web3.eth.contract(
             address=Web3.to_checksum_address(contract_address), abi=contract_abi
@@ -55,8 +61,9 @@ class DownloaderBot:
             db_dir = os.path.dirname(db_path)
             if db_dir:
                 os.makedirs(db_dir, exist_ok=True)
-            self.conn = sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES)
+            self.conn = sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES, check_same_thread=False)
             self.conn.row_factory = sqlite3.Row
+            self._db_lock = threading.Lock()
             self._init_schema()
 
         # Cache ABIs/topics for decoding and filtering.
@@ -153,7 +160,7 @@ class DownloaderBot:
 
         return events
 
-    def extract_chunks(self, events: Iterable[Dict[str, Any]]) -> List[Tuple[int, bytes]]:
+    def extract_chunks(self, events: Iterable[Dict[str, Any]], file_id: Optional[str] = None) -> List[Tuple[int, bytes]]:
         """
         Convert decoded events (or cached rows) into a deduplicated list of (chunkIndex, bytes).
         Duplicate indices are overwritten by the last occurrence.
@@ -167,7 +174,11 @@ class DownloaderBot:
                 idx = int(evt["chunkIndex"])
                 data = bytes(evt["data"])
             if idx in chunk_map:
-                self.logger.warning("Duplicate chunk index %s encountered; overwriting previous data", idx)
+                self.logger.warning(
+                    "Duplicate chunk index %s encountered for file %s; overwriting previous data",
+                    idx,
+                    file_id or "unknown",
+                )
             chunk_map[idx] = data  # overwrites duplicates safely
         return [(idx, chunk_map[idx]) for idx in sorted(chunk_map)]
 
@@ -194,7 +205,7 @@ class DownloaderBot:
         try:
             return gzip.decompress(data)
         except OSError as exc:
-            raise ValueError("Decompression failed (gzip data may be corrupted)") from exc
+            raise ValueError(f"Decompression failed (gzip data may be corrupted): {exc}") from exc
 
     def verify_hash(self, data: bytes, expected_hash: str) -> bool:
         """
@@ -242,14 +253,14 @@ class DownloaderBot:
             to_block=to_block,
             total_chunks=metadata["totalChunks"],
         )
-        chunks = self.extract_chunks(events)
+        chunks = self.extract_chunks(events, file_id=metadata["fileId"])
         self.validate_chunks(chunks, metadata["totalChunks"])
         compressed = self.reconstruct_data(chunks)
         decompressed = self.decompress_data(compressed)
         computed_hash = self._hash_bytes(decompressed)
         if not self.verify_hash(decompressed, metadata["contentHash"]):
             raise ValueError(
-                f"SHA256 hash mismatch: expected {metadata['contentHash']}, got {computed_hash}"
+                f"Content integrity verification failed: computed SHA256 {computed_hash} does not match expected {metadata['contentHash']}"
             )
         self.save_file(output_path, decompressed)
         return metadata
@@ -290,34 +301,36 @@ class DownloaderBot:
 
     def _upsert_file(self, metadata: Dict[str, Any]) -> None:
         assert self.conn is not None
-        self.conn.execute(
-            """
-            INSERT INTO files (file_id, name, size, chunk_count, owner, tx_hash, block_number)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(file_id) DO UPDATE SET
-              name=excluded.name,
-              size=excluded.size,
-              chunk_count=excluded.chunk_count,
-              owner=excluded.owner
-            """,
-            (
-                metadata["fileId"],
-                metadata["name"],
-                metadata["size"],
-                metadata["totalChunks"],
-                metadata["owner"],
-                None,
-                None,
-            ),
-        )
-        self.conn.commit()
+        with self._db_lock:
+            self.conn.execute(
+                """
+                INSERT INTO files (file_id, name, size, chunk_count, owner, tx_hash, block_number)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(file_id) DO UPDATE SET
+                  name=excluded.name,
+                  size=excluded.size,
+                  chunk_count=excluded.chunk_count,
+                  owner=excluded.owner
+                """,
+                (
+                    metadata["fileId"],
+                    metadata["name"],
+                    metadata["size"],
+                    metadata["totalChunks"],
+                    metadata["owner"],
+                    None,
+                    None,
+                ),
+            )
+            self.conn.commit()
 
     def _load_cached_chunks(self, file_id: str) -> List[Dict[str, Any]]:
         assert self.conn is not None
-        rows = self.conn.execute(
-            "SELECT chunk_index, data, tx_hash, block_number FROM chunks WHERE file_id = ?",
-            (file_id,),
-        ).fetchall()
+        with self._db_lock:
+            rows = self.conn.execute(
+                "SELECT chunk_index, data, tx_hash, block_number FROM chunks WHERE file_id = ?",
+                (file_id,),
+            ).fetchall()
         events: List[Dict[str, Any]] = []
         for row in rows:
             events.append(
@@ -335,20 +348,21 @@ class DownloaderBot:
         assert self.conn is not None
         chunk_index = int(event["args"]["chunkIndex"])
         data = bytes(event["args"]["data"])
-        self.conn.execute(
-            """
-            INSERT OR REPLACE INTO chunks (file_id, chunk_index, data, tx_hash, block_number)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                file_id,
-                chunk_index,
-                sqlite3.Binary(data),
-                event.get("transactionHash"),
-                event.get("blockNumber"),
-            ),
-        )
-        self.conn.commit()
+        with self._db_lock:
+            self.conn.execute(
+                """
+                INSERT OR REPLACE INTO chunks (file_id, chunk_index, data, tx_hash, block_number)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    file_id,
+                    chunk_index,
+                    sqlite3.Binary(data),
+                    event.get("transactionHash"),
+                    event.get("blockNumber"),
+                ),
+            )
+            self.conn.commit()
 
     def _get_chunk_logs_for_range(self, file_id: str, start_block: int, end_block: int) -> List[Dict[str, Any]]:
         filter_params = {
@@ -376,15 +390,19 @@ class DownloaderBot:
         return "0x" + hashlib.sha256(data).hexdigest()
 
     def _call_with_retries(self, fn: Callable[[], T]) -> T:
+        last_error: Optional[Exception] = None
         for attempt in range(1, self.retry_attempts + 1):
             try:
                 return fn()
             except (KeyboardInterrupt, SystemExit):
                 raise
-            except Exception:
+            except Exception as exc:
+                last_error = exc
                 if attempt == self.retry_attempts:
-                    raise
+                    break
                 time.sleep(self.retry_backoff_seconds * (2 ** (attempt - 1)))
+        assert last_error is not None
+        raise last_error
 
     @staticmethod
     def _hex(topic: Any) -> str:
