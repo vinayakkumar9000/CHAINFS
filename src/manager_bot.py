@@ -223,6 +223,17 @@ class ManagerBot:
         print(f"Wallet Balance   : {Web3.from_wei(post_balance, 'ether')} CREDIT")
 
     def _select_wallet(self) -> LocalAccount:
+        if WALLET_FILE_PATH.exists():
+            while True:
+                choice = input(
+                    f"Existing wallet detected at {WALLET_FILE_PATH}. Use it? (y/n): "
+                ).strip().lower()
+                if choice in {"y", "yes"}:
+                    return self._load_wallet_from_file()
+                if choice in {"n", "no"}:
+                    break
+                print("Invalid input. Please enter y or n.")
+
         while True:
             print("Select an option:")
             print("  1) Create new wallet")
@@ -233,6 +244,17 @@ class ManagerBot:
             if choice == "2":
                 return self._handle_existing_wallet()
             print("Invalid choice. Please enter 1 or 2.")
+
+    def _load_wallet_from_file(self) -> LocalAccount:
+        try:
+            pk = WALLET_FILE_PATH.read_text().strip()
+            wallet = self.load_wallet_from_private_key(pk)
+            print(f"Loaded wallet from file: {wallet.address}")
+            return wallet
+        except Exception as exc:
+            print(f"Failed to load wallet from {WALLET_FILE_PATH}: {exc}")
+            print("Please select another option below.")
+            return self._select_wallet()
 
     def _handle_new_wallet(self) -> LocalAccount:
         wallet = self.generate_wallet()
@@ -252,7 +274,9 @@ class ManagerBot:
     def _handle_existing_wallet(self) -> LocalAccount:
         pk = input("Enter your private key (0x...): ").strip()
         wallet = self.load_wallet_from_private_key(pk)
+        self._persist_private_key(wallet.key.hex())
         print(f"Using wallet: {wallet.address}")
+        print(f"Private key saved to {WALLET_FILE_PATH} (permissions restricted where possible).")
         return wallet
 
 
