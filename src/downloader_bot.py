@@ -65,7 +65,7 @@ class DownloaderBot:
             db_dir = os.path.dirname(db_path)
             if db_dir:
                 os.makedirs(db_dir, exist_ok=True)
-            self.conn = sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES, check_same_thread=False)
+            self.conn = sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES)
             self.conn.row_factory = sqlite3.Row
             self.conn.execute("PRAGMA journal_mode=WAL")
             self._db_lock = threading.Lock()
@@ -405,7 +405,7 @@ class DownloaderBot:
                 last_error = exc
                 if attempt == self.retry_attempts:
                     break
-                delay = min(self.retry_backoff_seconds * (1.5 ** (attempt - 1)), self.max_backoff_seconds)
+                delay = min(self.retry_backoff_seconds * (2 ** (attempt - 1)), self.max_backoff_seconds)
                 time.sleep(delay)
         assert last_error is not None
         raise last_error
