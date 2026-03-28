@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import logging
 import os
 import sqlite3
 import time
@@ -48,6 +49,7 @@ class DownloaderBot:
         self.retry_attempts = max(3, retry_attempts)
         self.retry_backoff_seconds = retry_backoff_seconds
 
+        self.logger = logging.getLogger(__name__)
         self.conn: Optional[sqlite3.Connection] = None
         if db_path:
             db_dir = os.path.dirname(db_path)
@@ -164,6 +166,8 @@ class DownloaderBot:
             else:
                 idx = int(evt["chunkIndex"])
                 data = bytes(evt["data"])
+            if idx in chunk_map:
+                self.logger.warning("Duplicate chunk index %s encountered; overwriting previous data", idx)
             chunk_map[idx] = data  # overwrites duplicates safely
         return [(idx, chunk_map[idx]) for idx in sorted(chunk_map)]
 
@@ -196,7 +200,7 @@ class DownloaderBot:
         """
         Compare SHA-256 digest (0x-prefixed hex) to expected_hash.
         """
-        digest = "0x" + hashlib.sha256(data).hexdigest()
+        digest = self._hash_bytes(data)
         normalized_expected = self._normalize_hash(expected_hash)
         return digest.lower() == normalized_expected.lower()
 
@@ -242,8 +246,11 @@ class DownloaderBot:
         self.validate_chunks(chunks, metadata["totalChunks"])
         compressed = self.reconstruct_data(chunks)
         decompressed = self.decompress_data(compressed)
+        computed_hash = self._hash_bytes(decompressed)
         if not self.verify_hash(decompressed, metadata["contentHash"]):
-            raise ValueError("SHA256 hash mismatch: reconstructed content is corrupted or incomplete")
+            raise ValueError(
+                f"SHA256 hash mismatch: expected {metadata['contentHash']}, got {computed_hash}"
+            )
         self.save_file(output_path, decompressed)
         return metadata
 
@@ -364,17 +371,20 @@ class DownloaderBot:
             cursor = upper + 1
         return ranges
 
+    @staticmethod
+    def _hash_bytes(data: bytes) -> str:
+        return "0x" + hashlib.sha256(data).hexdigest()
+
     def _call_with_retries(self, fn: Callable[[], T]) -> T:
         for attempt in range(1, self.retry_attempts + 1):
             try:
                 return fn()
-            except Exception:  # broad by design: we must retry RPC failures
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except Exception:
                 if attempt == self.retry_attempts:
                     raise
                 time.sleep(self.retry_backoff_seconds * (2 ** (attempt - 1)))
-            except BaseException:
-                # Do not swallow system-level exceptions.
-                raise
 
     @staticmethod
     def _hex(topic: Any) -> str:
