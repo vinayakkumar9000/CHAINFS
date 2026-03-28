@@ -24,6 +24,8 @@ const { ethers } = require("ethers");
 const db = require("./db");
 const storageBotModule = require("./storage-bot");
 const downloaderBotModule = require("./downloader-bot");
+const { DatabaseManager, DEFAULT_DB_PATH } = require("./db-manager");
+const { SyncEngine } = require("./sync-engine");
 
 // ─── ABI (only the events and functions we need) ──────────────────────────────
 
@@ -90,6 +92,9 @@ program
   .option("-v, --verbose", "print progress")
   .action(async (filePath, opts) => {
     const database = db.openDb(getEnv("CHAINFS_DB_PATH"));
+    const dbManager = new DatabaseManager(
+      getEnv("CHAINFS_INDEX_DB_PATH") || DEFAULT_DB_PATH
+    ).initialize();
     const { contract } = buildContract(true);
 
     try {
@@ -97,12 +102,15 @@ program
         filePath: path.resolve(filePath),
         contract,
         database,
+        dbManager,
         verbose: opts.verbose,
       });
       console.log(`Uploaded: fileId=${fileId} chunks=${chunkCount}`);
     } catch (err) {
       console.error("Upload failed:", err.message);
       process.exit(1);
+    } finally {
+      dbManager.close();
     }
   });
 
@@ -139,18 +147,26 @@ program
   .command("list")
   .description("List all files in the local index")
   .action(() => {
-    const database = db.openDb(getEnv("CHAINFS_DB_PATH"));
-    const files = db.listFiles(database);
+    const dbManager = new DatabaseManager(
+      getEnv("CHAINFS_INDEX_DB_PATH") || DEFAULT_DB_PATH
+    ).initialize();
 
-    if (files.length === 0) {
-      console.log("No files found. Run `chainfs sync` to index the chain.");
-      return;
-    }
+    try {
+      const files = dbManager.listFiles();
 
-    for (const f of files) {
-      console.log(
-        `${f.file_id}  ${f.name}  ${f.size}B  chunks=${f.chunk_count}  owner=${f.owner}`
-      );
+      if (files.length === 0) {
+        console.log("No files found. Run `chainfs sync` to index the chain.");
+        return;
+      }
+
+      for (const f of files) {
+        console.log(
+          `${f.file_id}  ${f.name}  ${f.original_size}B  ` +
+            `chunks=${f.total_chunks}  owner=${f.owner}`
+        );
+      }
+    } finally {
+      dbManager.close();
     }
   });
 
@@ -161,15 +177,20 @@ program
   .description("Sync the local index with on-chain events")
   .option("-v, --verbose", "print progress")
   .action(async (opts) => {
-    const database = db.openDb(getEnv("CHAINFS_DB_PATH"));
+    const dbManager = new DatabaseManager(
+      getEnv("CHAINFS_INDEX_DB_PATH") || DEFAULT_DB_PATH
+    ).initialize();
     const { contract } = buildContract(false);
 
     try {
-      await downloaderBotModule.sync({ contract, database, verbose: opts.verbose });
+      const engine = new SyncEngine({ contract, dbManager });
+      await engine.sync(opts.verbose);
       console.log("Sync complete.");
     } catch (err) {
       console.error("Sync failed:", err.message);
       process.exit(1);
+    } finally {
+      dbManager.close();
     }
   });
 
