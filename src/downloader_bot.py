@@ -39,11 +39,14 @@ class DownloaderBot:
         log_batch_size: int = 1_000,
         retry_attempts: int = 3,
         retry_backoff_seconds: float = 0.5,
+        max_backoff_seconds: float = 5.0,
     ) -> None:
         if max_workers <= 0:
             raise ValueError("max_workers must be a positive integer")
         if log_batch_size <= 0:
             raise ValueError("log_batch_size must be a positive integer")
+        if max_backoff_seconds <= 0:
+            raise ValueError("max_backoff_seconds must be positive")
 
         self.web3 = web3
         self.contract = web3.eth.contract(
@@ -51,9 +54,10 @@ class DownloaderBot:
         )
         self.max_workers = max_workers
         self.log_batch_size = log_batch_size
-        # Enforce minimum retries to satisfy the "at least 3" requirement.
+        # Enforce a minimum of 3 retries to satisfy the requirement.
         self.retry_attempts = max(3, retry_attempts)
         self.retry_backoff_seconds = retry_backoff_seconds
+        self.max_backoff_seconds = max_backoff_seconds
 
         self.logger = logging.getLogger(__name__)
         self.conn: Optional[sqlite3.Connection] = None
@@ -179,7 +183,7 @@ class DownloaderBot:
                     idx,
                     file_id or "unknown",
                 )
-            chunk_map[idx] = data  # overwrites duplicates safely
+            chunk_map[idx] = data
         return [(idx, chunk_map[idx]) for idx in sorted(chunk_map)]
 
     def validate_chunks(self, chunks: Sequence[Tuple[int, bytes]], total_chunks: int) -> None:
@@ -400,7 +404,8 @@ class DownloaderBot:
                 last_error = exc
                 if attempt == self.retry_attempts:
                     break
-                time.sleep(self.retry_backoff_seconds * (2 ** (attempt - 1)))
+                delay = min(self.retry_backoff_seconds * (2 ** (attempt - 1)), self.max_backoff_seconds)
+                time.sleep(delay)
         assert last_error is not None
         raise last_error
 
