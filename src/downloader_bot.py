@@ -17,7 +17,9 @@ import os
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, TypeVar
+
+T = TypeVar("T")
 
 from web3 import Web3
 from web3._utils.events import get_event_data
@@ -42,12 +44,15 @@ class DownloaderBot:
         )
         self.max_workers = max_workers
         self.log_batch_size = log_batch_size
-        self.retry_attempts = max(3, retry_attempts)  # at least 3 retries
+        # Enforce minimum retries to satisfy the "at least 3" requirement.
+        self.retry_attempts = max(3, retry_attempts)
         self.retry_backoff_seconds = retry_backoff_seconds
 
         self.conn: Optional[sqlite3.Connection] = None
         if db_path:
-            os.makedirs(os.path.dirname(db_path), exist_ok=True) if os.path.dirname(db_path) else None
+            db_dir = os.path.dirname(db_path)
+            if db_dir:
+                os.makedirs(db_dir, exist_ok=True)
             self.conn = sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES, check_same_thread=False)
             self.conn.row_factory = sqlite3.Row
             self._init_schema()
@@ -199,7 +204,9 @@ class DownloaderBot:
         """
         Write bytes to disk (binary-safe).
         """
-        os.makedirs(os.path.dirname(file_path), exist_ok=True) if os.path.dirname(file_path) else None
+        dir_name = os.path.dirname(file_path)
+        if dir_name:
+            os.makedirs(dir_name, exist_ok=True)
         with open(file_path, "wb") as handle:
             handle.write(data)
 
@@ -357,7 +364,7 @@ class DownloaderBot:
             cursor = upper + 1
         return ranges
 
-    def _call_with_retries(self, fn):
+    def _call_with_retries(self, fn: Callable[[], T]) -> T:
         last_err: Optional[Exception] = None
         for attempt in range(1, self.retry_attempts + 1):
             try:
