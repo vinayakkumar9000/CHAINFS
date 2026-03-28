@@ -368,13 +368,13 @@ class DownloaderBot:
         for attempt in range(1, self.retry_attempts + 1):
             try:
                 return fn()
-            except BaseException:
-                # Do not swallow system-level exceptions.
-                raise
-            except Exception as exc:  # broad by design: we must retry RPC failures
+            except Exception:  # broad by design: we must retry RPC failures
                 if attempt == self.retry_attempts:
                     raise
                 time.sleep(self.retry_backoff_seconds * (2 ** (attempt - 1)))
+            except BaseException:
+                # Do not swallow system-level exceptions.
+                raise
 
     @staticmethod
     def _hex(topic: Any) -> str:
