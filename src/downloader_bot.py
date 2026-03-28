@@ -200,7 +200,7 @@ class DownloaderBot:
         unique_indices = {idx for idx, _ in chunks}
         if len(unique_indices) != total_chunks:
             missing = set(range(total_chunks)) - unique_indices
-            raise ValueError(f"Missing chunks: {sorted(missing)}")
+            raise ValueError(f"Incomplete file: missing chunks {sorted(missing)}")
 
     def reconstruct_data(self, chunks: Sequence[Tuple[int, bytes]]) -> bytes:
         """
@@ -217,7 +217,7 @@ class DownloaderBot:
             return gzip.decompress(data)
         except OSError as exc:
             prefix = f" for file {file_id}" if file_id else ""
-            raise ValueError(f"Decompression failed{prefix} (gzip data may be corrupted): {exc}") from exc
+            raise ValueError(f"Invalid compressed data{prefix}: {exc}") from exc
 
     def verify_hash(self, data: bytes, expected_hash: str) -> Tuple[bool, str]:
         """
@@ -258,7 +258,15 @@ class DownloaderBot:
                 raise ValueError("Either file_id or tx_hash must be provided")
             file_id = self.resolve_file_id(tx_hash)
 
-        metadata = self.get_file_metadata(file_id)
+        try:
+            metadata = self.get_file_metadata(file_id)
+        except (ValueError, Exception) as exc:
+            # Surface a consistent "File not found" message while preserving the cause.
+            exc_str = str(exc)
+            if "FileNotFound" in exc_str or "does not exist" in exc_str or "not found" in exc_str.lower():
+                raise ValueError(f"File not found: {file_id}") from exc
+            raise
+
         events = self.fetch_chunk_events(
             metadata["fileId"],
             from_block=from_block,
@@ -272,10 +280,60 @@ class DownloaderBot:
         matches, computed_hash = self.verify_hash(decompressed, metadata["contentHash"])
         if not matches:
             raise ValueError(
-                f"Content integrity verification failed: computed SHA256 {computed_hash} does not match expected {metadata['contentHash']}"
+                f"File corrupted: computed SHA256 {computed_hash} does not match expected {metadata['contentHash']}"
             )
         self.save_file(output_path, decompressed)
         return metadata
+
+    def download_file(
+        self,
+        file_id_or_tx_hash: str,
+        output_path: str,
+        *,
+        from_block: Optional[int] = None,
+        to_block: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Convenience orchestrator: accepts either a fileId or a transaction hash,
+        resolves to a fileId automatically, then runs the full download pipeline.
+
+        Parameters
+        ----------
+        file_id_or_tx_hash:
+            A 0x-prefixed 32-byte fileId (64 hex chars) **or** a transaction hash
+            that contains a FileCreated / ChunkUploaded event for the target file.
+        output_path:
+            Destination path where the reconstructed binary file will be written.
+        from_block / to_block:
+            Optional block range for log fetching (narrows RPC queries).
+
+        Returns the file metadata dict on success.
+        Raises ValueError on any integrity, completeness, or resolution failure.
+        """
+        # Distinguish a tx hash (66 chars: "0x" + 64) from a fileId (also 66 chars)
+        # by trying getFile first; fall back to resolve_file_id on failure.
+        file_id: Optional[str] = None
+        value = file_id_or_tx_hash.strip()
+
+        # Attempt to treat the input as a fileId directly.
+        try:
+            normalized = self._normalize_file_id(value)
+            # Call getFile to verify the fileId exists on-chain (result discarded — existence check only).
+            self.contract.functions.getFile(normalized).call()
+            file_id = normalized
+        except Exception:
+            # Not a valid/known fileId — try treating it as a transaction hash instead.
+            try:
+                file_id = self.resolve_file_id(value)
+            except Exception as exc:
+                raise ValueError(f"File not found: {value}") from exc
+
+        return self.download(
+            file_id=file_id,
+            output_path=output_path,
+            from_block=from_block,
+            to_block=to_block,
+        )
 
     # --------------------------------------------------------------------- #
     # Internal helpers
